@@ -1,92 +1,77 @@
+# تثبيت المكتبات المطلوبة
+!pip install ultralytics streamlit opencv-python-headless pyngrok streamlit-webrtc -q  
+
 import cv2
 import numpy as np
 import streamlit as st
+from streamlit_webrtc import webrtc_streamer
 from ultralytics import YOLO
+import tempfile
+import os
+from pyngrok import ngrok
+from subprocess import Popen
 
-# تحميل نموذج YOLOv8 Pose
-model = YOLO("yolov8n-pose.pt")
+# 🔐 إعداد ngrok باستخدام authtoken (استبدله بـ التوكن الخاص بك)
+NGROK_AUTH_TOKEN = "YOUR_NGROK_AUTHTOKEN"  # ⛔ استبدل التوكن هنا 🔴
+!ngrok authtoken {NGROK_AUTH_TOKEN}
 
-# إعداد واجهة Streamlit
-st.set_page_config(page_title="Real-Time Pose Estimation", layout="wide")
-st.title("👁️ كشف مفاصل الجسم الحي - YOLOv8 Pose")
+# تحميل نموذج YOLOv8-Pose
+model = YOLO('yolov8n-pose.pt')
+
+# 📌 إنشاء تطبيق Streamlit
+with open("app.py", "w") as f:
+    f.write("""
+import streamlit as st
+import cv2
+import numpy as np
+from ultralytics import YOLO
+from streamlit_webrtc import webrtc_streamer
+
+# تحميل النموذج
+model = YOLO('yolov8n-pose.pt')
+
+st.set_page_config(page_title="YOLOv8 Pose Estimation", layout="wide")
+st.title('👁️ كشف مفاصل الجسم باستخدام YOLOv8 Pose')
 st.markdown("---")
 
-# اختيار طريقة الإدخال
-option = st.radio("اختر طريقة الإدخال:", ["📷 الكاميرا المباشرة", "📁 رفع صورة"], horizontal=True)
+st.write("✅ التطبيق جاهز! اختر طريقة الإدخال.")
 
-# دالة لرسم المفاصل المطلوبة فقط
-def draw_custom_joints(frame, keypoints, conf_threshold=0.5):
-    # المفاصل المطلوبة فقط
-    JOINT_INDICES = {
-        'shoulder': [5, 6], 
-        'elbow': [7, 8], 
-        'wrist': [9, 10],
-        'hip': [11, 12], 
-        'knee': [13, 14]
-    }
+option = st.radio("اختر الإدخال:", ["📷 الكاميرا", "📁 رفع صورة"], horizontal=True)
 
-    COLORS = {
-        'shoulder': (0, 255, 0),    # أخضر
-        'elbow': (255, 0, 0),       # أزرق
-        'wrist': (0, 0, 255),       # أحمر
-        'hip': (255, 255, 0),       # سماوي
-        'knee': (0, 255, 255)       # أصفر
-    }
-
-    for joint_type, indices in JOINT_INDICES.items():
-        for idx in indices:
-            kp = keypoints[idx]
-            if kp[2] >= conf_threshold:  # الثقة
-                x, y = int(kp[0]), int(kp[1])
-                cv2.circle(frame, (x, y), 6, COLORS[joint_type], -1)
-
-    # خطوط الربط بين المفاصل
-    connections = [(5,7), (6,8), (7,9), (8,10), (11,13), (12,14)]  
-    for (start, end) in connections:
-        kp_start, kp_end = keypoints[start], keypoints[end]
-        if kp_start[2] >= conf_threshold and kp_end[2] >= conf_threshold:
-            start_pt = (int(kp_start[0]), int(kp_start[1]))
-            end_pt = (int(kp_end[0]), int(kp_end[1]))
-            cv2.line(frame, start_pt, end_pt, (255, 255, 255), 2)
-
-    return frame
-
-# معالجة الإطار باستخدام YOLO
 def process_frame(frame):
-    results = model(frame)
+    results = model.predict(frame, conf=0.6, imgsz=320)
     if results[0].keypoints is not None:
-        keypoints = results[0].keypoints.xy.cpu().numpy()[0]  # استخراج النقاط
-        return draw_custom_joints(frame, keypoints)
+        keypoints = results[0].keypoints[0].cpu().numpy()
+        for i in range(17):
+            x, y, conf = keypoints[i]
+            if conf >= 0.5:
+                cv2.circle(frame, (int(x), int(y)), 5, (0, 255, 0), -1)
     return frame
 
-# تشغيل الكاميرا المباشرة
-if option == "📷 الكاميرا المباشرة":
-    live_cam = st.checkbox("✅ تشغيل الكاميرا")
-    
-    if live_cam:
-        cap = cv2.VideoCapture(0)  # تشغيل الكاميرا
-        
-        if not cap.isOpened():
-            st.error("❌ لم يتم العثور على كاميرا!")
-        else:
-            stframe = st.empty()
-            while live_cam:
-                ret, frame = cap.read()
-                if not ret:
-                    st.error("❌ تعذر تشغيل الكاميرا!")
-                    break
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                processed = process_frame(frame)
-                stframe.image(processed, use_column_width=True)
-            
-            cap.release()
-
-# رفع صورة ومعالجتها
-elif option == "📁 رفع صورة":
-    uploaded_file = st.file_uploader("🖼️ اختر صورة", type=["jpg", "png", "jpeg"])
-    if uploaded_file is not None:
-        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-        frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+if option == "📁 رفع صورة":
+    uploaded_file = st.file_uploader("📂 ارفع صورة", type=["jpg", "png", "jpeg"])
+    if uploaded_file:
+        frame = cv2.imdecode(np.frombuffer(uploaded_file.read(), np.uint8), cv2.IMREAD_COLOR)
         processed = process_frame(frame)
-        st.image(processed, caption="🔍 الكشف عن المفاصل", use_column_width=True)
+        st.image(cv2.cvtColor(processed, cv2.COLOR_BGR2RGB), caption="🔍 النتيجة", use_column_width=True)
+
+elif option == "📷 الكاميرا":
+    st.write("📸 استخدم الكاميرا المباشرة من متصفحك:")
+    
+    def video_callback(frame):
+        img = frame.to_ndarray(format="bgr24")
+        processed = process_frame(img)
+        return processed
+    
+    webrtc_streamer(key="pose_detection", video_frame_callback=video_callback)
+""")
+
+# 🔁 إعادة تشغيل أي عملية Streamlit قديمة
+!pkill streamlit
+
+# ▶ تشغيل Streamlit في الخلفية
+Popen(["streamlit", "run", "app.py", "--server.port", "8501", "--server.headless", "true"])
+
+# 🌍 تشغيل ngrok وإنشاء رابط خارجي
+public_url = ngrok.connect(8501).public_url
+print(f"\n\n🟢 افتح الرابط التالي للوصول إلى التطبيق: {public_url}")
